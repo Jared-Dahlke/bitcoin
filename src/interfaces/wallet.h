@@ -87,6 +87,17 @@ public:
     //! Back up wallet.
     virtual bool backupWallet(const std::string& filename) = 0;
 
+    //! Import a ranged output descriptor into the wallet and mark it as
+    //! active, for the internal (change) chain if internal is set, otherwise
+    //! for the external (receiving) chain.
+    virtual util::Result<void> importDescriptor(const std::string& descriptor, bool internal, int64_t creation_time) = 0;
+
+    //! Return a cosigner key string "[fingerprint/48h/<coin>h/0h/2h]xpub..."
+    //! for participating in a multisig, derived from the wallet's active HD
+    //! key at the BIP 87 multisig derivation path. The wallet must have
+    //! private keys and be unlocked.
+    virtual util::Result<std::string> getMultisigCosignerKey() = 0;
+
     //! Get wallet name.
     virtual std::string getWalletName() = 0;
 
