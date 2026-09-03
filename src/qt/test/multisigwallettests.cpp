@@ -114,6 +114,8 @@ void TestCreateMultisigWallet(interfaces::Node& node)
     QVERIFY(!descriptor.isEmpty());
     const QString multisig_address{dialog.firstAddress()}; // changed with cosigner 1's key
     QVERIFY(bool(signer_interface->importMultisigParticipation(descriptor.toStdString(), GetTime())));
+    // Importing the same participation again is a no-op, not an error.
+    QVERIFY(bool(signer_interface->importMultisigParticipation(descriptor.toStdString(), GetTime())));
     const CTxDestination multisig_dest{DecodeDestination(multisig_address.toStdString())};
     QVERIFY(IsValidDestination(multisig_dest));
     {
