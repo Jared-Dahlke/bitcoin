@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <QMessageBox>
@@ -160,6 +161,9 @@ private:
     void finish();
 
     QString m_first_address;
+    //! Cosigner keys that were filled in from loaded wallets, by row, so the
+    //! multisig descriptor can be imported into those wallets after creation.
+    std::map<int, std::pair<WalletModel*, QString>> m_wallet_keys;
     CreateMultisigWalletDialog* m_dialog{nullptr};
 };
 

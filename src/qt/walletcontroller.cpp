@@ -358,6 +358,7 @@ void CreateMultisigWalletActivity::create()
         const auto derived{wallet_model->wallet().getMultisigCosignerKey()};
         if (derived) {
             m_dialog->setCosignerKey(index, QString::fromStdString(*derived));
+            m_wallet_keys[index] = {wallet_model, QString::fromStdString(*derived)};
         } else {
             QMessageBox::warning(m_dialog, tr("Wallet key unavailable"), QString::fromStdString(util::ErrorString(derived).translated));
         }
@@ -429,12 +430,45 @@ void CreateMultisigWalletActivity::finish()
     }
 
     if (m_wallet_model) {
+        // Give each cosigner wallet whose key was filled in from a loaded
+        // wallet the descriptor with its own private key substituted in, so
+        // it can sign for the multisig.
+        QStringList import_failures;
+        if (m_dialog) {
+            const auto wallets{m_wallet_controller->getWallets()};
+            for (const auto& [index, wallet_key] : m_wallet_keys) {
+                WalletModel* wallet_model{wallet_key.first};
+                // The wallet may have been unloaded, or the user may have
+                // replaced the derived key afterwards.
+                if (std::find(wallets.begin(), wallets.end(), wallet_model) == wallets.end()) continue;
+                if (m_dialog->cosignerKey(index) != wallet_key.second) continue;
+                WalletModel::UnlockContext unlock_context(wallet_model->requestUnlock());
+                if (!unlock_context.isValid()) {
+                    //: %1 is the name of a cosigner wallet.
+                    import_failures << tr("%1: wallet could not be unlocked").arg(wallet_model->getDisplayName());
+                    continue;
+                }
+                for (const QString& desc : m_dialog->descriptors()) {
+                    const auto imported{wallet_model->wallet().importMultisigParticipation(desc.toStdString(), GetTime())};
+                    if (!imported) {
+                        import_failures << QString("%1: %2").arg(wallet_model->getDisplayName(), QString::fromStdString(util::ErrorString(imported).translated));
+                        break;
+                    }
+                }
+            }
+        }
         QMessageBox::information(m_parent_widget,
             //: Title of message box shown after a multisig wallet was created successfully.
             tr("Multisig wallet created"),
             /*: Message shown after a multisig wallet was created successfully.
                 %1 is the first receiving address of the wallet. */
             tr("Before using the wallet, verify with every cosigner that the first receiving address matches: %1").arg(m_first_address));
+        if (!import_failures.isEmpty()) {
+            QMessageBox::warning(m_parent_widget,
+                //: Title of message box shown when the multisig descriptor could not be imported into some cosigner wallets.
+                tr("Cosigner wallet setup incomplete"),
+                tr("The following wallets will not be able to sign for the multisig until the descriptor is imported into them:") + QLatin1Char('\n') + import_failures.join(QLatin1Char('\n')));
+        }
         Q_EMIT created(m_wallet_model);
     }
 

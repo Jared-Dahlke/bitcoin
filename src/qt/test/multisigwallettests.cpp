@@ -6,12 +6,18 @@
 
 #include <test/util/setup_common.h>
 
+#include <addresstype.h>
+#include <consensus/amount.h>
 #include <interfaces/node.h>
 #include <interfaces/wallet.h>
 #include <key_io.h>
 #include <outputtype.h>
+#include <primitives/transaction.h>
+#include <psbt.h>
 #include <qt/createmultisigwalletdialog.h>
+#include <script/interpreter.h>
 #include <util/check.h>
+#include <util/error.h>
 #include <util/time.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
@@ -24,6 +30,7 @@
 using wallet::AddWallet;
 using wallet::CWallet;
 using wallet::CreateMockableWalletDatabase;
+using wallet::ISMINE_NO;
 using wallet::RemoveWallet;
 using wallet::WALLET_FLAG_DESCRIPTORS;
 using wallet::WALLET_FLAG_DISABLE_PRIVATE_KEYS;
@@ -109,6 +116,50 @@ void TestCreateMultisigWallet(interfaces::Node& node)
     dialog.findChild<QLineEdit*>("cosigner_key_edit_0")->setText(QString::fromStdString(*cosigner_key));
     QVERIFY(create_button->isEnabled());
 
+    // Importing the multisig descriptors into the signer wallet with its own
+    // private key substituted in makes the multisig addresses IsMine there.
+    const QStringList descriptors{dialog.descriptors()};
+    QCOMPARE(descriptors.size(), 2);
+    const QString multisig_address{dialog.firstAddress()}; // changed with cosigner 1's key
+    for (const QString& desc : descriptors) {
+        QVERIFY(bool(signer_interface->importMultisigParticipation(desc.toStdString(), GetTime())));
+    }
+    const CTxDestination multisig_dest{DecodeDestination(multisig_address.toStdString())};
+    QVERIFY(IsValidDestination(multisig_dest));
+    {
+        LOCK(signer_wallet->cs_wallet);
+        QVERIFY(signer_wallet->IsMine(multisig_dest) != ISMINE_NO);
+    }
+    // The imported descriptors are not active, so deriving the cosigner key
+    // still works.
+    QVERIFY(bool(signer_interface->getMultisigCosignerKey()));
+
+    // The signer wallet can now add its signature to a PSBT spending the
+    // multisig, e.g. one created by the watch-only multisig wallet.
+    CMutableTransaction funding_tx;
+    funding_tx.vout.emplace_back(COIN, GetScriptForDestination(multisig_dest));
+    CMutableTransaction spend_tx;
+    spend_tx.vin.emplace_back(COutPoint(funding_tx.GetHash(), 0));
+    spend_tx.vout.emplace_back(COIN - 10000, GetScriptForDestination(multisig_dest));
+    PartiallySignedTransaction psbtx{spend_tx};
+    psbtx.inputs[0].witness_utxo = funding_tx.vout[0];
+    bool complete{true};
+    QVERIFY(signer_wallet->FillPSBT(psbtx, complete, SIGHASH_ALL, /*sign=*/true, /*bip32derivs=*/true) == TransactionError::OK);
+    QVERIFY(!complete); // the other cosigner's signature is still missing
+    QCOMPARE(psbtx.inputs[0].partial_sigs.size(), size_t{1});
+
+    // A wallet whose key is not part of the descriptor cannot participate.
+    const std::shared_ptr<CWallet> other_wallet = std::make_shared<CWallet>(node.context()->chain.get(), "", CreateMockableWalletDatabase());
+    other_wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    {
+        LOCK(other_wallet->cs_wallet);
+        other_wallet->SetupDescriptorScriptPubKeyMans();
+    }
+    AddWallet(context, other_wallet);
+    auto other_interface = interfaces::MakeWallet(context, other_wallet);
+    QVERIFY(!other_interface->importMultisigParticipation(descriptors[0].toStdString(), GetTime()));
+
+    RemoveWallet(context, other_wallet, /*load_on_start=*/std::nullopt);
     RemoveWallet(context, signer_wallet, /*load_on_start=*/std::nullopt);
     RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
 }
