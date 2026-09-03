@@ -59,6 +59,8 @@ private Q_SLOTS:
 
 private:
     void updateWalletMenus();
+    //! Fill in the key of the given cosigner from a user-chosen text file.
+    void loadCosignerKeyFromFile(int index);
 
     QLineEdit* m_wallet_name;
     QSpinBox* m_required_spin;

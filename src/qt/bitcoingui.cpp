@@ -48,6 +48,7 @@
 #include <QCursor>
 #include <QDateTime>
 #include <QDragEnterEvent>
+#include <QFile>
 #include <QInputDialog>
 #include <QKeySequence>
 #include <QListWidget>
@@ -63,6 +64,7 @@
 #include <QStatusBar>
 #include <QStyle>
 #include <QSystemTrayIcon>
+#include <QTextStream>
 #include <QTimer>
 #include <QToolBar>
 #include <QUrlQuery>
@@ -358,6 +360,10 @@ void BitcoinGUI::createActions()
     m_create_multisig_wallet_action->setEnabled(false);
     m_create_multisig_wallet_action->setStatusTip(tr("Create a new multisig wallet from cosigner public keys"));
 
+    m_export_cosigner_key_action = new QAction(tr("Export Cosigner Key…"), this);
+    m_export_cosigner_key_action->setEnabled(false);
+    m_export_cosigner_key_action->setStatusTip(tr("Save this wallet's multisig cosigner key to a file to share with other cosigners"));
+
     //: Name of the menu item that restores wallet from a backup file.
     m_restore_wallet_action = new QAction(tr("Restore Wallet…"), this);
     m_restore_wallet_action->setEnabled(false);
@@ -476,6 +482,7 @@ void BitcoinGUI::createActions()
         });
         connect(m_create_wallet_action, &QAction::triggered, this, &BitcoinGUI::createWallet);
         connect(m_create_multisig_wallet_action, &QAction::triggered, this, &BitcoinGUI::createMultisigWallet);
+        connect(m_export_cosigner_key_action, &QAction::triggered, this, &BitcoinGUI::exportCosignerKey);
         connect(m_close_all_wallets_action, &QAction::triggered, [this] {
             m_wallet_controller->closeAllWallets(this);
         });
@@ -566,6 +573,7 @@ void BitcoinGUI::createMenuBar()
     {
         file->addAction(m_create_wallet_action);
         file->addAction(m_create_multisig_wallet_action);
+        file->addAction(m_export_cosigner_key_action);
         file->addAction(m_open_wallet_action);
         file->addAction(m_close_wallet_action);
         file->addAction(m_close_all_wallets_action);
@@ -778,6 +786,7 @@ void BitcoinGUI::setWalletController(WalletController* wallet_controller, bool s
 
     m_create_wallet_action->setEnabled(true);
     m_create_multisig_wallet_action->setEnabled(true);
+    m_export_cosigner_key_action->setEnabled(true);
     m_open_wallet_action->setEnabled(true);
     m_open_wallet_action->setMenu(m_open_wallet_menu);
     m_restore_wallet_action->setEnabled(true);
@@ -1297,6 +1306,33 @@ void BitcoinGUI::createMultisigWallet()
     connect(activity, &CreateMultisigWalletActivity::created, this, &BitcoinGUI::setCurrentWallet);
     connect(activity, &CreateMultisigWalletActivity::created, rpcConsole, &RPCConsole::setCurrentWallet);
     activity->create();
+#endif // ENABLE_WALLET
+}
+
+void BitcoinGUI::exportCosignerKey()
+{
+#ifdef ENABLE_WALLET
+    WalletModel* wallet_model{walletFrame->currentWalletModel()};
+    if (!wallet_model) return;
+    WalletModel::UnlockContext unlock_context(wallet_model->requestUnlock());
+    if (!unlock_context.isValid()) return;
+    const auto derived{wallet_model->wallet().getMultisigCosignerKey()};
+    if (!derived) {
+        QMessageBox::warning(this, tr("Cosigner key unavailable"), QString::fromStdString(util::ErrorString(derived).translated));
+        return;
+    }
+    QString filename = GUIUtil::getSaveFileName(this,
+        tr("Export Cosigner Key"), wallet_model->getWalletName() + QLatin1String("-cosigner-key.txt"),
+        tr("Text file (*.txt)"), nullptr);
+    if (filename.isEmpty()) return;
+    QFile file(filename);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        //: %1 is the path of the file the cosigner key could not be written to.
+        QMessageBox::warning(this, tr("Export Cosigner Key"), tr("Unable to write cosigner key to %1.").arg(filename));
+        return;
+    }
+    QTextStream out(&file);
+    out << QString::fromStdString(*derived) << "\n";
 #endif // ENABLE_WALLET
 }
 

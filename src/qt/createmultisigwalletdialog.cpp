@@ -22,12 +22,15 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QFile>
 #include <QLineEdit>
 #include <QMenu>
+#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSpinBox>
+#include <QTextStream>
 #include <QVBoxLayout>
 
 namespace {
@@ -180,7 +183,6 @@ void CreateMultisigWalletDialog::updateWalletMenus()
 {
     for (size_t i = 0; i < m_cosigner_wallet_buttons.size(); ++i) {
         QPushButton* button{m_cosigner_wallet_buttons.at(i)};
-        button->setVisible(!m_wallet_models.empty());
         QMenu* menu{button->menu()};
         menu->clear();
         for (WalletModel* wallet_model : m_wallet_models) {
@@ -188,7 +190,36 @@ void CreateMultisigWalletDialog::updateWalletMenus()
                 Q_EMIT walletKeyRequested(static_cast<int>(i), wallet_model);
             });
         }
+        if (!m_wallet_models.empty()) menu->addSeparator();
+        menu->addAction(tr("From file…"), this, [this, i] {
+            loadCosignerKeyFromFile(static_cast<int>(i));
+        });
     }
+}
+
+void CreateMultisigWalletDialog::loadCosignerKeyFromFile(int index)
+{
+    const QString filename{GUIUtil::getOpenFileName(this,
+        tr("Load Cosigner Key"), QString(),
+        tr("Text file (*.txt)") + QLatin1String(";;") + tr("All files (*)"), nullptr)};
+    if (filename.isEmpty()) return;
+
+    QString key;
+    QFile file(filename);
+    if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        // A cosigner key file holds a single short line, so only the first
+        // few KB need to be considered.
+        QTextStream in(&file);
+        for (const QString& line : in.read(4096).split('\n')) {
+            key = line.trimmed();
+            if (!key.isEmpty()) break;
+        }
+    }
+    if (key.isEmpty()) {
+        QMessageBox::warning(this, tr("Load Cosigner Key"), tr("Unable to read cosigner key file."));
+        return;
+    }
+    setCosignerKey(index, key);
 }
 
 void CreateMultisigWalletDialog::validate()
