@@ -139,6 +139,13 @@ WalletTxOut MakeWalletTxOut(const CWallet& wallet,
     return result;
 }
 
+//! BIP 87 multisig derivation path: m/48h/<coin>h/0h/2h (2h = P2WSH).
+std::vector<uint32_t> MultisigKeyPath()
+{
+    constexpr uint32_t hardened{0x80000000};
+    return {48 | hardened, (Params().IsTestChain() ? 1u : 0u) | hardened, hardened, 2 | hardened};
+}
+
 class WalletImpl : public Wallet
 {
 public:
@@ -204,9 +211,12 @@ public:
         m_wallet->RefreshAllTXOs();
         return {};
     }
-    util::Result<std::string> getMultisigCosignerKey() override
+    //! Derive the wallet's cosigner key at the BIP 87 multisig path. Returns
+    //! the derived cosigner key with its origin info. The wallet must have
+    //! private keys and be unlocked.
+    util::Result<std::pair<CExtKey, KeyOriginInfo>> deriveMultisigCosignerKey() EXCLUSIVE_LOCKS_REQUIRED(m_wallet->cs_wallet)
     {
-        LOCK(m_wallet->cs_wallet);
+        AssertLockHeld(m_wallet->cs_wallet);
         if (m_wallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
             return util::Error{Untranslated("Wallet has no private keys")};
         }
@@ -224,14 +234,68 @@ public:
         if (!master_key) {
             return util::Error{Untranslated("Unable to retrieve the wallet's HD key")};
         }
-        // BIP 87 multisig derivation path: m/48h/<coin>h/0h/2h (2h = P2WSH).
-        const uint32_t coin_type{Params().IsTestChain() ? 1u : 0u};
-        const std::vector<uint32_t> path{48 | 0x80000000, coin_type | 0x80000000, 0x80000000, 2 | 0x80000000};
-        const auto derived{DeriveExtKey(*master_key, path)};
+        const auto derived{DeriveExtKey(*master_key, MultisigKeyPath())};
         if (!derived) {
             return util::Error{Untranslated("Unable to derive a multisig key")};
         }
-        return strprintf("[%s%s]%s", HexStr(derived->second.fingerprint), FormatHDKeypath(path), EncodeExtPubKey(derived->first.Neuter()));
+        return *derived;
+    }
+    util::Result<std::string> getMultisigCosignerKey() override
+    {
+        LOCK(m_wallet->cs_wallet);
+        const auto derived{deriveMultisigCosignerKey()};
+        if (!derived) return util::Error{util::ErrorString(derived)};
+        return strprintf("[%s%s]%s", HexStr(derived->second.fingerprint), FormatHDKeypath(MultisigKeyPath()), EncodeExtPubKey(derived->first.Neuter()));
+    }
+    util::Result<void> importMultisigParticipation(const std::string& descriptor, int64_t creation_time) override
+    {
+        LOCK(m_wallet->cs_wallet);
+        const auto derived{deriveMultisigCosignerKey()};
+        if (!derived) return util::Error{util::ErrorString(derived)};
+        const std::string xpub_str{EncodeExtPubKey(derived->first.Neuter())};
+        const std::string xprv_str{EncodeExtKey(derived->first)};
+        // Substituting the private key invalidates any trailing checksum, so
+        // strip it before the replacement.
+        std::string priv_desc{descriptor.substr(0, descriptor.find('#'))};
+        if (priv_desc.find(xpub_str) == std::string::npos) {
+            return util::Error{Untranslated("This wallet's cosigner key is not part of the descriptor")};
+        }
+        for (size_t pos{0}; (pos = priv_desc.find(xpub_str, pos)) != std::string::npos; pos += xprv_str.size()) {
+            priv_desc.replace(pos, xpub_str.size(), xprv_str);
+        }
+        FlatSigningProvider keys;
+        std::string error;
+        std::vector<std::unique_ptr<Descriptor>> parsed_descs = Parse(priv_desc, keys, error, /*require_checksum=*/false);
+        if (parsed_descs.empty()) {
+            return util::Error{Untranslated(error)};
+        }
+        if (!parsed_descs.at(0)->IsRange()) {
+            return util::Error{Untranslated("Descriptor must be ranged")};
+        }
+        if (keys.keys.empty()) {
+            return util::Error{Untranslated("Unable to substitute the wallet's private key into the descriptor")};
+        }
+        for (size_t i = 0; i < parsed_descs.size(); ++i) {
+            auto parsed_desc{std::move(parsed_descs[i])};
+            const bool internal{parsed_descs.size() == 2 && i == 1};
+            // Expand to check whether the descriptor can be derived at the first index.
+            FlatSigningProvider expand_keys;
+            std::vector<CScript> scripts;
+            if (!parsed_desc->Expand(0, keys, scripts, expand_keys)) {
+                return util::Error{Untranslated("Cannot expand descriptor. Probably because of hardened derivations without private keys provided")};
+            }
+            WalletDescriptor w_desc(std::move(parsed_desc), creation_time, /*range_start=*/0, /*range_end=*/m_wallet->m_keypool_size, /*next_index=*/0);
+            // Deliberately not activated: the wallet keeps handing out
+            // addresses from its own chains, but recognizes and can sign for
+            // the multisig.
+            auto spk_manager{m_wallet->AddWalletDescriptor(w_desc, keys, /*label=*/"", internal)};
+            if (!spk_manager) {
+                return util::Error{util::ErrorString(spk_manager)};
+            }
+        }
+        m_wallet->ConnectScriptPubKeyManNotifiers();
+        m_wallet->RefreshAllTXOs();
+        return {};
     }
     std::string getWalletName() override { return m_wallet->GetName(); }
     util::Result<CTxDestination> getNewDestination(const OutputType type, const std::string& label) override

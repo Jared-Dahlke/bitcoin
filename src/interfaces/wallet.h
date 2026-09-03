@@ -100,6 +100,13 @@ public:
     //! private keys and be unlocked.
     virtual util::Result<std::string> getMultisigCosignerKey() = 0;
 
+    //! Import the given multisig descriptor into this wallet with the
+    //! wallet's own private key substituted in, as non-active descriptors,
+    //! so the wallet can sign for the multisig. The wallet must hold private
+    //! keys, be unlocked, and its BIP 87 cosigner key must appear in the
+    //! descriptor.
+    virtual util::Result<void> importMultisigParticipation(const std::string& descriptor, int64_t creation_time) = 0;
+
     //! Get wallet name.
     virtual std::string getWalletName() = 0;
 

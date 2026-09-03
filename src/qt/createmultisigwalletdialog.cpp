@@ -179,6 +179,12 @@ void CreateMultisigWalletDialog::setCosignerKey(int index, const QString& key)
     m_cosigner_edits.at(index)->setText(key);
 }
 
+QString CreateMultisigWalletDialog::cosignerKey(int index) const
+{
+    if (index < 0 || index >= static_cast<int>(m_cosigner_edits.size())) return {};
+    return m_cosigner_edits.at(index)->text().trimmed();
+}
+
 void CreateMultisigWalletDialog::updateWalletMenus()
 {
     for (size_t i = 0; i < m_cosigner_wallet_buttons.size(); ++i) {

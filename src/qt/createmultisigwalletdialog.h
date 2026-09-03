@@ -47,6 +47,9 @@ public:
     //! Fill in the key of the given cosigner, e.g. after a
     //! walletKeyRequested signal was handled.
     void setCosignerKey(int index, const QString& key);
+    //! Currently entered key of the given cosigner (trimmed), or an empty
+    //! string if the index is out of range.
+    QString cosignerKey(int index) const;
 
 Q_SIGNALS:
     //! Emitted when the user asks for a cosigner key to be filled in from
