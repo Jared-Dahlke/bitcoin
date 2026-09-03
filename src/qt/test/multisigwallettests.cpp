@@ -19,6 +19,7 @@
 #include <util/check.h>
 #include <util/error.h>
 #include <util/time.h>
+#include <util/translation.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
 
@@ -30,6 +31,8 @@
 using wallet::AddWallet;
 using wallet::CWallet;
 using wallet::CreateMockableWalletDatabase;
+using wallet::DuplicateMockDatabase;
+using wallet::GetMockableDatabase;
 using wallet::ISMINE_NO;
 using wallet::RemoveWallet;
 using wallet::WALLET_FLAG_DESCRIPTORS;
@@ -136,8 +139,24 @@ void TestCreateMultisigWallet(interfaces::Node& node)
     // still works.
     QVERIFY(bool(signer_interface->getMultisigCosignerKey()));
 
-    // The signer wallet can now add its signature to a PSBT spending the
-    // multisig, e.g. one created by the watch-only multisig wallet.
+    // Reload the signer wallet from a copy of its database. The in-memory
+    // Descriptor objects built at import time are discarded, so signing below
+    // must rely solely on the cosigner key as persisted to disk. This mirrors
+    // real usage (walletprocesspsbt / GUI Load PSBT after a restart).
+    std::unique_ptr<wallet::WalletDatabase> reload_db{DuplicateMockDatabase(GetMockableDatabase(*signer_wallet))};
+    RemoveWallet(context, signer_wallet, /*load_on_start=*/std::nullopt);
+    bilingual_str reload_error;
+    std::vector<bilingual_str> reload_warnings;
+    const std::shared_ptr<CWallet> reloaded_wallet{CWallet::Create(context, "", std::move(reload_db), WALLET_FLAG_DESCRIPTORS, reload_error, reload_warnings)};
+    QVERIFY(reloaded_wallet != nullptr);
+    AddWallet(context, reloaded_wallet);
+    {
+        LOCK(reloaded_wallet->cs_wallet);
+        QVERIFY(reloaded_wallet->IsMine(multisig_dest) != ISMINE_NO);
+    }
+
+    // The reloaded signer wallet can now add its signature to a PSBT spending
+    // the multisig, e.g. one created by the watch-only multisig wallet.
     CMutableTransaction funding_tx;
     funding_tx.vout.emplace_back(COIN, GetScriptForDestination(multisig_dest));
     CMutableTransaction spend_tx;
@@ -146,7 +165,7 @@ void TestCreateMultisigWallet(interfaces::Node& node)
     PartiallySignedTransaction psbtx{spend_tx};
     psbtx.inputs[0].witness_utxo = funding_tx.vout[0];
     bool complete{true};
-    QVERIFY(signer_wallet->FillPSBT(psbtx, complete, SIGHASH_ALL, /*sign=*/true, /*bip32derivs=*/true) == TransactionError::OK);
+    QVERIFY(reloaded_wallet->FillPSBT(psbtx, complete, SIGHASH_ALL, /*sign=*/true, /*bip32derivs=*/true) == TransactionError::OK);
     QVERIFY(!complete); // the other cosigner's signature is still missing
     QCOMPARE(psbtx.inputs[0].partial_sigs.size(), size_t{1});
 
@@ -162,7 +181,7 @@ void TestCreateMultisigWallet(interfaces::Node& node)
     QVERIFY(!other_interface->importMultisigParticipation(descriptors[0].toStdString(), GetTime()));
 
     RemoveWallet(context, other_wallet, /*load_on_start=*/std::nullopt);
-    RemoveWallet(context, signer_wallet, /*load_on_start=*/std::nullopt);
+    RemoveWallet(context, reloaded_wallet, /*load_on_start=*/std::nullopt);
     RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
 }
 
