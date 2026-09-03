@@ -346,6 +346,10 @@ void BitcoinGUI::createActions()
     m_create_wallet_action->setEnabled(false);
     m_create_wallet_action->setStatusTip(tr("Create a new wallet"));
 
+    m_create_multisig_wallet_action = new QAction(tr("Create Multisig Wallet…"), this);
+    m_create_multisig_wallet_action->setEnabled(false);
+    m_create_multisig_wallet_action->setStatusTip(tr("Create a new multisig wallet from cosigner public keys"));
+
     //: Name of the menu item that restores wallet from a backup file.
     m_restore_wallet_action = new QAction(tr("Restore Wallet…"), this);
     m_restore_wallet_action->setEnabled(false);
@@ -451,6 +455,7 @@ void BitcoinGUI::createActions()
             m_wallet_controller->closeWallet(walletFrame->currentWalletModel(), this);
         });
         connect(m_create_wallet_action, &QAction::triggered, this, &BitcoinGUI::createWallet);
+        connect(m_create_multisig_wallet_action, &QAction::triggered, this, &BitcoinGUI::createMultisigWallet);
         connect(m_close_all_wallets_action, &QAction::triggered, [this] {
             m_wallet_controller->closeAllWallets(this);
         });
@@ -477,6 +482,7 @@ void BitcoinGUI::createMenuBar()
     if(walletFrame)
     {
         file->addAction(m_create_wallet_action);
+        file->addAction(m_create_multisig_wallet_action);
         file->addAction(m_open_wallet_action);
         file->addAction(m_close_wallet_action);
         file->addAction(m_close_all_wallets_action);
@@ -685,6 +691,7 @@ void BitcoinGUI::setWalletController(WalletController* wallet_controller, bool s
     m_wallet_controller = wallet_controller;
 
     m_create_wallet_action->setEnabled(true);
+    m_create_multisig_wallet_action->setEnabled(true);
     m_open_wallet_action->setEnabled(true);
     m_open_wallet_action->setMenu(m_open_wallet_menu);
     m_restore_wallet_action->setEnabled(true);
@@ -1197,6 +1204,16 @@ void BitcoinGUI::createWallet()
     auto activity = new CreateWalletActivity(getWalletController(), this);
     connect(activity, &CreateWalletActivity::created, this, &BitcoinGUI::setCurrentWallet);
     connect(activity, &CreateWalletActivity::created, rpcConsole, &RPCConsole::setCurrentWallet);
+    activity->create();
+#endif // ENABLE_WALLET
+}
+
+void BitcoinGUI::createMultisigWallet()
+{
+#ifdef ENABLE_WALLET
+    auto activity = new CreateMultisigWalletActivity(getWalletController(), this);
+    connect(activity, &CreateMultisigWalletActivity::created, this, &BitcoinGUI::setCurrentWallet);
+    connect(activity, &CreateMultisigWalletActivity::created, rpcConsole, &RPCConsole::setCurrentWallet);
     activity->create();
 #endif // ENABLE_WALLET
 }

@@ -6,6 +6,7 @@
 
 #include <qt/askpassphrasedialog.h>
 #include <qt/clientmodel.h>
+#include <qt/createmultisigwalletdialog.h>
 #include <qt/createwalletdialog.h>
 #include <qt/guiconstants.h>
 #include <qt/guiutil.h>
@@ -16,6 +17,7 @@
 #include <interfaces/node.h>
 #include <util/string.h>
 #include <util/threadnames.h>
+#include <util/time.h>
 #include <util/translation.h>
 #include <wallet/wallet.h>
 
@@ -62,6 +64,12 @@ WalletController::~WalletController()
     m_activity_thread->quit();
     m_activity_thread->wait();
     delete m_activity_worker;
+}
+
+std::vector<WalletModel*> WalletController::getWallets() const
+{
+    QMutexLocker locker(&m_mutex);
+    return m_wallets;
 }
 
 std::map<std::string, bool> WalletController::listWalletDir() const
@@ -320,6 +328,117 @@ void CreateWalletActivity::create()
             createWallet();
         }
     });
+}
+
+CreateMultisigWalletActivity::CreateMultisigWalletActivity(WalletController* wallet_controller, QWidget* parent_widget)
+    : WalletControllerActivity(wallet_controller, parent_widget)
+{
+}
+
+CreateMultisigWalletActivity::~CreateMultisigWalletActivity()
+{
+    delete m_dialog;
+}
+
+void CreateMultisigWalletActivity::create()
+{
+    m_dialog = new CreateMultisigWalletDialog(m_parent_widget);
+
+    std::vector<WalletModel*> eligible_wallets;
+    for (WalletModel* wallet_model : m_wallet_controller->getWallets()) {
+        if (!wallet_model->wallet().privateKeysDisabled()) eligible_wallets.push_back(wallet_model);
+    }
+    m_dialog->setWallets(eligible_wallets);
+    connect(m_dialog, &CreateMultisigWalletDialog::walletKeyRequested, this, [this](int index, WalletModel* wallet_model) {
+        // The wallet may have been unloaded while the dialog was open.
+        const auto wallets{m_wallet_controller->getWallets()};
+        if (std::find(wallets.begin(), wallets.end(), wallet_model) == wallets.end()) return;
+        WalletModel::UnlockContext unlock_context(wallet_model->requestUnlock());
+        if (!unlock_context.isValid()) return;
+        const auto derived{wallet_model->wallet().getMultisigCosignerKey()};
+        if (derived) {
+            m_dialog->setCosignerKey(index, QString::fromStdString(*derived));
+        } else {
+            QMessageBox::warning(m_dialog, tr("Wallet key unavailable"), QString::fromStdString(util::ErrorString(derived).translated));
+        }
+    });
+
+    m_dialog->setWindowModality(Qt::ApplicationModal);
+    m_dialog->show();
+
+    connect(m_dialog, &QObject::destroyed, [this] {
+        m_dialog = nullptr;
+    });
+    connect(m_dialog, &QDialog::rejected, [this] {
+        Q_EMIT finished();
+    });
+    connect(m_dialog, &QDialog::accepted, [this] {
+        createWallet();
+    });
+}
+
+void CreateMultisigWalletActivity::createWallet()
+{
+    showProgressDialog(
+        //: Title of window indicating the progress of creation of a new multisig wallet.
+        tr("Create Multisig Wallet"),
+        /*: Descriptive text of the create multisig wallet progress window which
+            indicates to the user which wallet is currently being created. */
+        tr("Creating Wallet <b>%1</b>…").arg(m_dialog->walletName().toHtmlEscaped()));
+
+    std::string name = m_dialog->walletName().toStdString();
+    std::vector<std::string> descriptors;
+    for (const QString& desc : m_dialog->descriptors()) {
+        descriptors.push_back(desc.toStdString());
+    }
+    m_first_address = m_dialog->firstAddress();
+
+    // The multisig wallet only tracks the cosigners' public keys. Signing
+    // happens externally (e.g. via PSBTs), so private keys are disabled.
+    uint64_t flags = WALLET_FLAG_DESCRIPTORS | WALLET_FLAG_DISABLE_PRIVATE_KEYS | WALLET_FLAG_BLANK_WALLET;
+
+    QTimer::singleShot(500ms, worker(), [this, name, flags, descriptors] {
+        auto wallet{node().walletLoader().createWallet(name, /*passphrase=*/{}, flags, m_warning_message)};
+
+        if (wallet) {
+            for (size_t i = 0; i < descriptors.size(); ++i) {
+                // The receiving chain descriptor comes first, then change.
+                auto imported{(*wallet)->importDescriptor(descriptors[i], /*internal=*/i == 1, /*creation_time=*/GetTime())};
+                if (!imported) {
+                    m_error_message = util::ErrorString(imported);
+                    break;
+                }
+            }
+            if (m_error_message.empty()) {
+                m_wallet_model = m_wallet_controller->getOrCreateWallet(std::move(*wallet));
+            }
+        } else {
+            m_error_message = util::ErrorString(wallet);
+        }
+
+        QTimer::singleShot(500ms, this, &CreateMultisigWalletActivity::finish);
+    });
+}
+
+void CreateMultisigWalletActivity::finish()
+{
+    if (!m_error_message.empty()) {
+        QMessageBox::critical(m_parent_widget, tr("Create wallet failed"), QString::fromStdString(m_error_message.translated));
+    } else if (!m_warning_message.empty()) {
+        QMessageBox::warning(m_parent_widget, tr("Create wallet warning"), QString::fromStdString(Join(m_warning_message, Untranslated("\n")).translated));
+    }
+
+    if (m_wallet_model) {
+        QMessageBox::information(m_parent_widget,
+            //: Title of message box shown after a multisig wallet was created successfully.
+            tr("Multisig wallet created"),
+            /*: Message shown after a multisig wallet was created successfully.
+                %1 is the first receiving address of the wallet. */
+            tr("Before using the wallet, verify with every cosigner that the first receiving address matches: %1").arg(m_first_address));
+        Q_EMIT created(m_wallet_model);
+    }
+
+    Q_EMIT finished();
 }
 
 OpenWalletActivity::OpenWalletActivity(WalletController* wallet_controller, QWidget* parent_widget)
