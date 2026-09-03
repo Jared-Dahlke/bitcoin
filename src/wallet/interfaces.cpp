@@ -194,11 +194,15 @@ public:
             return util::Error{Untranslated("Unknown output type, cannot set descriptor to active")};
         }
         WalletDescriptor w_desc(std::move(parsed_desc), creation_time, /*range_start=*/0, /*range_end=*/m_wallet->m_keypool_size, /*next_index=*/0);
-        auto spk_manager{m_wallet->AddWalletDescriptor(w_desc, keys, /*label=*/"", internal)};
-        if (!spk_manager) {
-            return util::Error{Untranslated("Could not add descriptor to the wallet")};
+        try {
+            auto spk_manager{m_wallet->AddWalletDescriptor(w_desc, keys, /*label=*/"", internal)};
+            if (!spk_manager) {
+                return util::Error{Untranslated("Could not add descriptor to the wallet")};
+            }
+            m_wallet->AddActiveScriptPubKeyMan(spk_manager->GetID(), *w_desc.descriptor->GetOutputType(), internal);
+        } catch (const std::exception& e) {
+            return util::Error{Untranslated(e.what())};
         }
-        m_wallet->AddActiveScriptPubKeyMan(spk_manager->GetID(), *w_desc.descriptor->GetOutputType(), internal);
         m_wallet->ConnectScriptPubKeyManNotifiers();
         return {};
     }
@@ -295,11 +299,21 @@ public:
             return util::Error{Untranslated("Cannot expand descriptor. Probably because of hardened derivations without private keys provided")};
         }
         WalletDescriptor w_desc(std::move(parsed_desc), creation_time, /*range_start=*/0, /*range_end=*/m_wallet->m_keypool_size, /*next_index=*/0);
-        // Deliberately not activated: the wallet keeps handing out addresses
-        // from its own chains, but recognizes and can sign for the multisig.
-        auto spk_manager{m_wallet->AddWalletDescriptor(w_desc, keys, /*label=*/"", /*internal=*/false)};
-        if (!spk_manager) {
-            return util::Error{Untranslated("Could not add descriptor to the wallet")};
+        // A repeated import (e.g. the wallet cosigns several multisigs built
+        // from the same keys) is already able to sign; re-adding would
+        // conflict with the stored descriptor's grown range.
+        if (m_wallet->GetDescriptorScriptPubKeyMan(w_desc)) {
+            return {};
+        }
+        try {
+            // Deliberately not activated: the wallet keeps handing out addresses
+            // from its own chains, but recognizes and can sign for the multisig.
+            auto spk_manager{m_wallet->AddWalletDescriptor(w_desc, keys, /*label=*/"", /*internal=*/false)};
+            if (!spk_manager) {
+                return util::Error{Untranslated("Could not add descriptor to the wallet")};
+            }
+        } catch (const std::exception& e) {
+            return util::Error{Untranslated(e.what())};
         }
         m_wallet->ConnectScriptPubKeyManNotifiers();
         return {};
