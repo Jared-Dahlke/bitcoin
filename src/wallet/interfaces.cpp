@@ -4,18 +4,25 @@
 
 #include <interfaces/wallet.h>
 
+#include <chainparams.h>
 #include <common/args.h>
 #include <consensus/amount.h>
 #include <interfaces/chain.h>
 #include <interfaces/handler.h>
+#include <key.h>
+#include <key_io.h>
 #include <node/types.h>
 #include <primitives/transaction.h>
 #include <rpc/server.h>
 #include <scheduler.h>
+#include <script/descriptor.h>
+#include <script/signingprovider.h>
 #include <support/allocators/secure.h>
 #include <sync.h>
 #include <uint256.h>
+#include <util/bip32.h>
 #include <util/check.h>
+#include <util/strencodings.h>
 #include <util/translation.h>
 #include <util/ui_change_type.h>
 #include <wallet/coincontrol.h>
@@ -152,6 +159,80 @@ public:
     }
     void abortRescan() override { m_wallet->AbortRescan(); }
     bool backupWallet(const std::string& filename) override { return m_wallet->BackupWallet(filename); }
+    util::Result<void> importDescriptor(const std::string& descriptor, int64_t creation_time) override
+    {
+        LOCK(m_wallet->cs_wallet);
+        FlatSigningProvider keys;
+        std::string error;
+        std::vector<std::unique_ptr<Descriptor>> parsed_descs = Parse(descriptor, keys, error, /*require_checksum=*/false);
+        if (parsed_descs.empty()) {
+            return util::Error{Untranslated(error)};
+        }
+        if (!parsed_descs.at(0)->IsRange()) {
+            return util::Error{Untranslated("Descriptor must be ranged")};
+        }
+        if (!parsed_descs.at(0)->IsSingleType()) {
+            return util::Error{Untranslated("Descriptor must produce a single script type")};
+        }
+        if (m_wallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS) && !keys.keys.empty()) {
+            return util::Error{Untranslated("Cannot import private keys to a wallet with private keys disabled")};
+        }
+        if (!m_wallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS) && keys.keys.empty()) {
+            return util::Error{Untranslated("Cannot import a descriptor without private keys to a wallet with private keys enabled")};
+        }
+        bool internal{false};
+        for (size_t i = 0; i < parsed_descs.size(); ++i) {
+            auto parsed_desc{std::move(parsed_descs[i])};
+            if (parsed_descs.size() == 2) internal = i == 1;
+            // Expand to check whether the descriptor can be derived at the first index.
+            FlatSigningProvider expand_keys;
+            std::vector<CScript> scripts;
+            if (!parsed_desc->Expand(0, keys, scripts, expand_keys)) {
+                return util::Error{Untranslated("Cannot expand descriptor. Probably because of hardened derivations without private keys provided")};
+            }
+            if (!parsed_desc->GetOutputType()) {
+                return util::Error{Untranslated("Unknown output type, cannot set descriptor to active")};
+            }
+            WalletDescriptor w_desc(std::move(parsed_desc), creation_time, /*range_start=*/0, /*range_end=*/m_wallet->m_keypool_size, /*next_index=*/0);
+            auto spk_manager{m_wallet->AddWalletDescriptor(w_desc, keys, /*label=*/"", internal)};
+            if (!spk_manager) {
+                return util::Error{util::ErrorString(spk_manager)};
+            }
+            m_wallet->AddActiveScriptPubKeyMan(spk_manager.value().get().GetID(), *w_desc.descriptor->GetOutputType(), internal);
+        }
+        m_wallet->ConnectScriptPubKeyManNotifiers();
+        m_wallet->RefreshAllTXOs();
+        return {};
+    }
+    util::Result<std::string> getMultisigCosignerKey() override
+    {
+        LOCK(m_wallet->cs_wallet);
+        if (m_wallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
+            return util::Error{Untranslated("Wallet has no private keys")};
+        }
+        if (m_wallet->IsLocked()) {
+            return util::Error{Untranslated("Wallet is locked")};
+        }
+        const auto hd_keys{m_wallet->GetHDPubKeys(CWallet::HDKeyFilter::Active)};
+        if (hd_keys.empty()) {
+            return util::Error{Untranslated("Wallet has no active HD key")};
+        }
+        if (hd_keys.size() > 1) {
+            return util::Error{Untranslated("Wallet has more than one active HD key")};
+        }
+        const auto master_key{m_wallet->GetExtKey(hd_keys.begin()->first)};
+        if (!master_key) {
+            return util::Error{Untranslated("Unable to retrieve the wallet's HD key")};
+        }
+        // BIP 87 multisig derivation path: m/48h/<coin>h/0h/2h (2h = P2WSH).
+        const uint32_t coin_type{Params().IsTestChain() ? 1u : 0u};
+        const std::vector<uint32_t> path{48 | 0x80000000, coin_type | 0x80000000, 0x80000000, 2 | 0x80000000};
+        const auto derived{DeriveExtKey(*master_key, path)};
+        if (!derived) {
+            return util::Error{Untranslated("Unable to derive a multisig key")};
+        }
+        return strprintf("[%s%s]%s", HexStr(derived->second.fingerprint), FormatHDKeypath(path), EncodeExtPubKey(derived->first.Neuter()));
+    }
     std::string getWalletName() override { return m_wallet->GetName(); }
     util::Result<CTxDestination> getNewDestination(const OutputType type, const std::string& label) override
     {
