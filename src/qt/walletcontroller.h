@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <QMessageBox>
@@ -38,6 +39,8 @@ class path;
 }
 
 class AskPassphraseDialog;
+class CreateMultisigWalletActivity;
+class CreateMultisigWalletDialog;
 class CreateWalletActivity;
 class CreateWalletDialog;
 class MigrateWalletActivity;
@@ -58,6 +61,9 @@ public:
     ~WalletController();
 
     WalletModel* getOrCreateWallet(std::unique_ptr<interfaces::Wallet> wallet);
+
+    //! Returns the models of all loaded wallets.
+    std::vector<WalletModel*> getWallets() const;
 
     //! Returns all wallet names in the wallet dir mapped to whether the wallet
     //! is loaded.
@@ -136,6 +142,30 @@ private:
     SecureString m_passphrase;
     CreateWalletDialog* m_create_wallet_dialog{nullptr};
     AskPassphraseDialog* m_passphrase_dialog{nullptr};
+};
+
+class CreateMultisigWalletActivity : public WalletControllerActivity
+{
+    Q_OBJECT
+
+public:
+    CreateMultisigWalletActivity(WalletController* wallet_controller, QWidget* parent_widget);
+    virtual ~CreateMultisigWalletActivity();
+
+    void create();
+
+Q_SIGNALS:
+    void created(WalletModel* wallet_model);
+
+private:
+    void createWallet();
+    void finish();
+
+    QString m_first_address;
+    //! Cosigner keys that were filled in from loaded wallets, by row, so the
+    //! multisig descriptor can be imported into those wallets after creation.
+    std::map<int, std::pair<WalletModel*, QString>> m_wallet_keys;
+    CreateMultisigWalletDialog* m_dialog{nullptr};
 };
 
 class OpenWalletActivity : public WalletControllerActivity

@@ -155,6 +155,8 @@ private:
     QAction* openAction = nullptr;
     QAction* showHelpMessageAction = nullptr;
     QAction* m_create_wallet_action{nullptr};
+    QAction* m_create_multisig_wallet_action{nullptr};
+    QAction* m_export_cosigner_key_action{nullptr};
     QAction* m_open_wallet_action{nullptr};
     QMenu* m_open_wallet_menu{nullptr};
     QAction* m_restore_wallet_action{nullptr};
@@ -235,6 +237,10 @@ public Q_SLOTS:
     void setNumBlocks(int count, const QDateTime& blockDate, double nVerificationProgress, SyncType synctype, SynchronizationState sync_state);
     /** Launch the wallet creation modal (no-op if wallet is not compiled) **/
     void createWallet();
+    /** Launch the multisig wallet creation modal (no-op if wallet is not compiled) **/
+    void createMultisigWallet();
+    /** Save the active wallet's multisig cosigner key to a file (no-op if wallet is not compiled) **/
+    void exportCosignerKey();
 
     /** Notify the user of an event from the core network or transaction handling code.
        @param[in] title             the message box / notification title

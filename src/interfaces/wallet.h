@@ -88,6 +88,32 @@ public:
     //! Back up wallet.
     virtual bool backupWallet(const std::string& filename) = 0;
 
+    //! Import a ranged output descriptor into the wallet and mark it as
+    //! active. If the descriptor is multipath (e.g. ".../<0;1>/*"), the first
+    //! derivation path is imported as the external (receiving) chain and the
+    //! second as the internal (change) chain. If rescan is set, the block
+    //! chain is rescanned from creation_time for existing transactions, like
+    //! the importdescriptors RPC does (on pruned nodes transactions in pruned
+    //! blocks are not found).
+    virtual util::Result<void> importDescriptor(const std::string& descriptor, int64_t creation_time, bool rescan) = 0;
+
+    //! Return a cosigner key string "[fingerprint/48h/<coin>h/0h/2h]xpub..."
+    //! for participating in a multisig, derived from the wallet's active HD
+    //! key at the BIP 48 multisig derivation path. The wallet must have
+    //! private keys and be unlocked.
+    virtual util::Result<std::string> getMultisigCosignerKey() = 0;
+
+    //! Teach this wallet to add signatures to PSBTs of a multisig built from
+    //! its BIP 48 cosigner key, by importing a small non-active helper
+    //! descriptor that covers the cosigner key's child keys. The multisig's
+    //! PSBTs carry the witness script and key origins, so no more is needed.
+    //! The multisig descriptor itself is deliberately not imported: the
+    //! wallet would treat the multisig funds as its own, adding them to its
+    //! balance and letting coin selection pick multisig coins it cannot
+    //! fully sign. The wallet must hold private keys, be unlocked, and its
+    //! BIP 48 cosigner key must appear in the descriptor.
+    virtual util::Result<void> importMultisigSigningKey(const std::string& descriptor) = 0;
+
     //! Get wallet name.
     virtual std::string getWalletName() = 0;
 
