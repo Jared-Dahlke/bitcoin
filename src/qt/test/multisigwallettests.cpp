@@ -19,25 +19,36 @@
 #include <qt/optionsmodel.h>
 #include <qt/platformstyle.h>
 #include <qt/psbtoperationsdialog.h>
+#include <qt/walletcontroller.h>
 #include <qt/walletmodel.h>
 #include <script/interpreter.h>
 #include <util/check.h>
+#include <validation.h>
 #include <util/error.h>
 #include <util/time.h>
 #include <util/translation.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
 
+#include <QApplication>
 #include <QDialogButtonBox>
+#include <QEventLoop>
 #include <QLabel>
+#include <QMenu>
+#include <QMessageBox>
+#include <QPointer>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QTimer>
+
+#include <algorithm>
 
 using wallet::AddWallet;
 using wallet::CWallet;
 using wallet::CreateMockableWalletDatabase;
 using wallet::DuplicateMockDatabase;
+using wallet::GetWallet;
 using wallet::GetMockableDatabase;
 using wallet::ISMINE_NO;
 using wallet::RemoveWallet;
@@ -230,9 +241,141 @@ void TestCreateMultisigWallet(interfaces::Node& node)
     RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
 }
 
+
+//! Drive the full Create Multisig Wallet activity like a user would: fill in
+//! the real dialog (cosigner 1 through the "From wallet" menu), accept it,
+//! and verify that the watch-only wallet is created on disk, that the source
+//! wallet learns to sign for the multisig without treating its funds as its
+//! own, and that it adds a partial signature to a PSBT prepared by the
+//! created wallet.
+void TestCreateMultisigWalletActivity(interfaces::Node& node)
+{
+#ifdef Q_OS_MACOS
+    if (QApplication::platformName() == "minimal") {
+        // Disable for mac on "minimal" platform to avoid hangs inside the Qt
+        // framework when modal dialogs are shown
+        // (https://bugreports.qt.io/browse/QTBUG-49686).
+        QWARN("Skipping TestCreateMultisigWalletActivity on mac build with 'minimal' platform set due to Qt bugs. "
+              "Invoke with 'QT_QPA_PLATFORM=cocoa test_bitcoin-qt' on mac, or else use a linux or windows build.");
+        return;
+    }
+#endif
+    TestChain100Setup test;
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    node.setContext(&test.m_node);
+    WalletContext& context = *node.walletLoader().context();
+
+    std::unique_ptr<const PlatformStyle> platform_style{PlatformStyle::instantiate("other")};
+    OptionsModel options_model{node};
+    bilingual_str options_error;
+    QVERIFY(options_model.Init(options_error));
+    ClientModel client_model{node, &options_model};
+    WalletController controller{client_model, platform_style.get(), nullptr};
+
+    // A loaded wallet with private keys serves as cosigner 1.
+    const std::shared_ptr<CWallet> source_wallet = std::make_shared<CWallet>(node.context()->chain.get(), "source", CreateMockableWalletDatabase());
+    source_wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    {
+        LOCK(source_wallet->cs_wallet);
+        source_wallet->SetupDescriptorScriptPubKeyMans();
+        // The wallet model requires a processed block height.
+        source_wallet->SetLastBlockProcessed(100, WITH_LOCK(node.context()->chainman->GetMutex(), return node.context()->chainman->ActiveChain().Tip()->GetBlockHash()));
+    }
+    AddWallet(context, source_wallet);
+    WalletModel* source_model{controller.getOrCreateWallet(interfaces::MakeWallet(context, source_wallet))};
+    QVERIFY(source_model);
+
+    auto* activity = new CreateMultisigWalletActivity(&controller, /*parent_widget=*/nullptr);
+    QPointer<CreateMultisigWalletActivity> activity_guard{activity};
+    WalletModel* created_model{nullptr};
+    QObject::connect(activity, &CreateMultisigWalletActivity::created, [&](WalletModel* model) { created_model = model; });
+    QEventLoop loop;
+    QObject::connect(activity, &CreateMultisigWalletActivity::finished, &loop, &QEventLoop::quit);
+    activity->create();
+
+    CreateMultisigWalletDialog* activity_dialog{nullptr};
+    for (QWidget* widget : QApplication::topLevelWidgets()) {
+        if (auto* d{qobject_cast<CreateMultisigWalletDialog*>(widget)}) activity_dialog = d;
+    }
+    QVERIFY(activity_dialog);
+    activity_dialog->findChild<QLineEdit*>("wallet_name_line_edit")->setText("msig_e2e");
+    // Fill cosigner 1 through the real "From wallet" menu, so the activity
+    // records the source wallet for the signing-key import.
+    QPushButton* from_wallet_button{nullptr};
+    for (auto* button : activity_dialog->findChildren<QPushButton*>()) {
+        if (button->menu()) {
+            from_wallet_button = button;
+            break;
+        }
+    }
+    QVERIFY(from_wallet_button);
+    from_wallet_button->menu()->actions().first()->trigger();
+    QVERIFY(activity_dialog->cosignerKey(0).contains("tpub"));
+    activity_dialog->findChild<QLineEdit*>("cosigner_key_edit_1")->setText(COSIGNER_KEY_2);
+    const QString multisig_address{activity_dialog->firstAddress()};
+    QVERIFY(!multisig_address.isEmpty());
+
+    // Dismiss message boxes (e.g. "Multisig wallet created") as they appear,
+    // recording their contents.
+    QTimer dismiss_timer;
+    QStringList shown_messages;
+    QObject::connect(&dismiss_timer, &QTimer::timeout, [&] {
+        if (auto* box{qobject_cast<QMessageBox*>(QApplication::activeModalWidget())}) {
+            shown_messages << box->text();
+            box->button(QMessageBox::Ok)->click();
+        }
+    });
+    dismiss_timer.start(std::chrono::milliseconds{100});
+    QTimer::singleShot(std::chrono::seconds{60}, &loop, &QEventLoop::quit); // safety timeout
+    activity_dialog->accept();
+    loop.exec();
+    dismiss_timer.stop();
+
+    QVERIFY(created_model != nullptr);
+    QCOMPARE(QString::fromStdString(created_model->wallet().getWalletName()), QString{"msig_e2e"});
+    QVERIFY(created_model->wallet().privateKeysDisabled());
+    // The created watch-only wallet hands out the address the dialog showed.
+    const auto dest{created_model->wallet().getNewDestination(OutputType::BECH32, "")};
+    QVERIFY(bool(dest));
+    QCOMPARE(QString::fromStdString(EncodeDestination(*dest)), multisig_address);
+    // The user was told which wallets can sign for the multisig.
+    QVERIFY(std::any_of(shown_messages.begin(), shown_messages.end(), [](const QString& m) { return m.contains("can sign for the multisig"); }));
+
+    // The source wallet learned to sign, but does not treat the multisig
+    // funds as its own.
+    const CTxDestination multisig_dest{DecodeDestination(multisig_address.toStdString())};
+    QVERIFY(IsValidDestination(multisig_dest));
+    {
+        LOCK(source_wallet->cs_wallet);
+        QVERIFY(source_wallet->IsMine(multisig_dest) == ISMINE_NO);
+    }
+    CMutableTransaction funding_tx;
+    funding_tx.vout.emplace_back(COIN, GetScriptForDestination(multisig_dest));
+    CMutableTransaction spend_tx;
+    spend_tx.vin.emplace_back(COutPoint(funding_tx.GetHash(), 0));
+    spend_tx.vout.emplace_back(COIN - 10000, GetScriptForDestination(multisig_dest));
+    PartiallySignedTransaction psbtx{spend_tx};
+    psbtx.inputs[0].witness_utxo = funding_tx.vout[0];
+    bool complete{true};
+    size_t fill_signed{0};
+    QCOMPARE(created_model->wallet().fillPSBT(SIGHASH_ALL, /*sign=*/false, /*bip32derivs=*/true, &fill_signed, psbtx, complete), TransactionError::OK);
+    QVERIFY(!psbtx.inputs[0].witness_script.empty());
+    QVERIFY(source_wallet->FillPSBT(psbtx, complete, SIGHASH_ALL, /*sign=*/true, /*bip32derivs=*/true) == TransactionError::OK);
+    QVERIFY(!complete); // the other cosigner's signature is still missing
+    QCOMPARE(psbtx.inputs[0].partial_sigs.size(), size_t{1});
+
+    if (activity_guard) delete activity;
+    const std::shared_ptr<CWallet> created_wallet{GetWallet(context, "msig_e2e")};
+    QVERIFY(created_wallet != nullptr);
+    RemoveWallet(context, created_wallet, /*load_on_start=*/std::nullopt);
+    RemoveWallet(context, source_wallet, /*load_on_start=*/std::nullopt);
+}
+
 } // namespace
 
 void MultisigWalletTests::multisigWalletTests()
 {
     TestCreateMultisigWallet(m_node);
+    TestCreateMultisigWalletActivity(m_node);
 }
