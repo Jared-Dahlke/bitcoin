@@ -13,6 +13,7 @@
 #include <script/descriptor.h>
 #include <script/script.h>
 #include <script/signingprovider.h>
+#include <util/string.h>
 
 #include <set>
 #include <string>
@@ -262,7 +263,7 @@ void CreateMultisigWalletDialog::validate()
         status = tr("Enter an extended public key for each cosigner.");
     } else {
         // One descriptor per chain: /0/* receives, /1/* change.
-        std::string receive_desc{"wsh(sortedmulti(" + std::to_string(m_required_spin->value())};
+        std::string receive_desc{"wsh(sortedmulti(" + ToString(m_required_spin->value())};
         std::string change_desc{receive_desc};
         for (const std::string& fragment : fragments) {
             receive_desc += "," + fragment + "/0/*";
