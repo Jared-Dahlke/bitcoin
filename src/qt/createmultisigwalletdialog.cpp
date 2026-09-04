@@ -12,11 +12,13 @@
 #include <script/descriptor.h>
 #include <script/script.h>
 #include <script/signingprovider.h>
+#include <util/string.h>
 
 #include <set>
 #include <string>
 #include <vector>
 
+#include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -67,6 +69,11 @@ CreateMultisigWalletDialog::CreateMultisigWalletDialog(QWidget* parent)
     auto* script_type_label = new QLabel(tr("Native SegWit multisig (P2WSH)"), this);
     script_type_label->setToolTip(tr("Addresses use a wsh(sortedmulti(…)) descriptor with the cosigner keys sorted per BIP 67, so every cosigner derives the same addresses regardless of key order."));
     form->addRow(tr("Address type"), script_type_label);
+
+    m_rescan_checkbox = new QCheckBox(tr("Rescan for existing transactions"), this);
+    m_rescan_checkbox->setObjectName("rescan_checkbox");
+    m_rescan_checkbox->setToolTip(tr("Enable if this multisig wallet already has transaction history, e.g. when re-creating it from the cosigner keys on a new machine. The block chain is scanned after the wallet is created so existing funds appear. On a pruned node transactions in pruned blocks cannot be found."));
+    form->addRow(tr("Existing wallet"), m_rescan_checkbox);
     main_layout->addLayout(form);
 
     auto* cosigner_box = new QGroupBox(tr("Cosigner keys"), this);
@@ -130,6 +137,11 @@ CreateMultisigWalletDialog::~CreateMultisigWalletDialog() = default;
 QString CreateMultisigWalletDialog::walletName() const
 {
     return m_wallet_name->text().trimmed();
+}
+
+bool CreateMultisigWalletDialog::rescanNeeded() const
+{
+    return m_rescan_checkbox->isChecked();
 }
 
 void CreateMultisigWalletDialog::updateCosignerRows()
@@ -249,7 +261,7 @@ void CreateMultisigWalletDialog::validate()
     } else if (static_cast<int>(fragments.size()) < m_total_spin->value()) {
         status = tr("Enter an extended public key for each cosigner.");
     } else {
-        std::string desc{"wsh(sortedmulti(" + std::to_string(m_required_spin->value())};
+        std::string desc{"wsh(sortedmulti(" + util::ToString(m_required_spin->value())};
         for (const std::string& fragment : fragments) {
             desc += "," + fragment + "/<0;1>/*";
         }
