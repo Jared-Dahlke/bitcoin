@@ -47,9 +47,7 @@
 using wallet::AddWallet;
 using wallet::CWallet;
 using wallet::CreateMockableWalletDatabase;
-using wallet::DuplicateMockDatabase;
 using wallet::GetWallet;
-using wallet::GetMockableDatabase;
 using wallet::ISMINE_NO;
 using wallet::RemoveWallet;
 using wallet::WALLET_FLAG_DESCRIPTORS;
@@ -121,15 +119,12 @@ void TestCreateMultisigWallet(interfaces::Node& node)
     QVERIFY(!wallet_interface->getMultisigCosignerKey());
 
     // ...but a wallet with private keys can, at the BIP 48 multisig path,
-    // and the dialog accepts the derived key.
-    const std::shared_ptr<CWallet> signer_wallet = std::make_shared<CWallet>(node.context()->chain.get(), "", CreateMockableWalletDatabase());
-    signer_wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
-    {
-        LOCK(signer_wallet->cs_wallet);
-        signer_wallet->SetupDescriptorScriptPubKeyMans();
-    }
-    AddWallet(context, signer_wallet);
-    auto signer_interface = interfaces::MakeWallet(context, signer_wallet);
+    // and the dialog accepts the derived key. Create the signer wallet
+    // through the loader, so it lives on disk and can be reloaded below.
+    std::vector<bilingual_str> signer_warnings;
+    auto signer_result{node.walletLoader().createWallet("signer", /*passphrase=*/{}, WALLET_FLAG_DESCRIPTORS, signer_warnings)};
+    QVERIFY(bool(signer_result));
+    std::unique_ptr<interfaces::Wallet> signer_interface{std::move(*signer_result)};
     const auto cosigner_key{signer_interface->getMultisigCosignerKey()};
     QVERIFY(bool(cosigner_key));
     QVERIFY(QString::fromStdString(*cosigner_key).contains("/48h/1h/0h/2h]tpub"));
@@ -149,6 +144,8 @@ void TestCreateMultisigWallet(interfaces::Node& node)
     // The helpers must not make the wallet treat the multisig funds as its
     // own: they would count toward its balance and break its coin selection.
     {
+        const std::shared_ptr<CWallet> signer_wallet{GetWallet(context, "signer")};
+        QVERIFY(signer_wallet != nullptr);
         LOCK(signer_wallet->cs_wallet);
         QVERIFY(signer_wallet->IsMine(multisig_dest) == ISMINE_NO);
     }
@@ -167,17 +164,18 @@ void TestCreateMultisigWallet(interfaces::Node& node)
         QVERIFY(bool(watch_interface->importDescriptor(descriptors[i].toStdString(), /*internal=*/i == 1, GetTime(), /*rescan=*/false)));
     }
 
-    // Reload the signer wallet from a copy of its database. The in-memory
-    // Descriptor objects built at import time are discarded, so signing below
-    // must rely solely on the helpers as persisted to disk. This mirrors
-    // real usage (walletprocesspsbt / GUI Load PSBT after a restart).
-    std::unique_ptr<wallet::WalletDatabase> reload_db{DuplicateMockDatabase(GetMockableDatabase(*signer_wallet))};
-    RemoveWallet(context, signer_wallet, /*load_on_start=*/std::nullopt);
-    bilingual_str reload_error;
-    std::vector<bilingual_str> reload_warnings;
-    const std::shared_ptr<CWallet> reloaded_wallet{CWallet::Create(context, "", std::move(reload_db), WALLET_FLAG_DESCRIPTORS, reload_error, reload_warnings)};
+    // Unload the signer wallet and reload it from disk. The in-memory
+    // Descriptor objects built at import time are discarded, so signing
+    // below must rely solely on the helpers as persisted to disk. This
+    // mirrors real usage (walletprocesspsbt / GUI Load PSBT after a
+    // restart).
+    signer_interface->remove();
+    signer_interface.reset();
+    std::vector<bilingual_str> load_warnings;
+    auto reload_result{node.walletLoader().loadWallet("signer", load_warnings)};
+    QVERIFY(bool(reload_result));
+    const std::shared_ptr<CWallet> reloaded_wallet{GetWallet(context, "signer")};
     QVERIFY(reloaded_wallet != nullptr);
-    AddWallet(context, reloaded_wallet);
 
     // The watch-only wallet prepares a PSBT spending the multisig, filling
     // in the witness script and key origins that let cosigner wallets sign.
