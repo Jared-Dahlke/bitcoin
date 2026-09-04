@@ -90,20 +90,20 @@ public:
     //! Import a ranged output descriptor into the wallet and mark it as
     //! active, for the internal (change) chain if internal is set, otherwise
     //! for the external (receiving) chain.
-    virtual util::Result<void> importDescriptor(const std::string& descriptor, bool internal, int64_t creation_time) = 0;
+    virtual util::Result<void> importDescriptor(const std::string& descriptor, bool internal, int64_t creation_time, bool rescan) = 0;
 
     //! Return a cosigner key string "[fingerprint/48h/<coin>h/0h/2h]xpub..."
     //! for participating in a multisig, derived from the wallet's active HD
-    //! key at the BIP 87 multisig derivation path. The wallet must have
+    //! key at the BIP 48 multisig derivation path. The wallet must have
     //! private keys and be unlocked.
     virtual util::Result<std::string> getMultisigCosignerKey() = 0;
 
     //! Import the given multisig descriptor into this wallet with the
     //! wallet's own private key substituted in, as non-active descriptors,
     //! so the wallet can sign for the multisig. The wallet must hold private
-    //! keys, be unlocked, and its BIP 87 cosigner key must appear in the
+    //! keys, be unlocked, and its BIP 48 cosigner key must appear in the
     //! descriptor.
-    virtual util::Result<void> importMultisigParticipation(const std::string& descriptor, int64_t creation_time) = 0;
+    virtual util::Result<std::string> getMultisigParticipationDescriptor(const std::string& descriptor) = 0;
 
     //! Get wallet name.
     virtual std::string getWalletName() = 0;

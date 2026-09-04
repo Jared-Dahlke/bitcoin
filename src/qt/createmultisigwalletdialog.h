@@ -10,6 +10,7 @@
 
 #include <vector>
 
+class QCheckBox;
 class QDialogButtonBox;
 class QFormLayout;
 class QLabel;
@@ -42,6 +43,9 @@ public:
     //! First receiving address derived from the descriptor. Empty until the
     //! dialog input validates.
     QString firstAddress() const { return m_first_address; }
+    //! Whether the user indicated the multisig already has transaction
+    //! history, so the block chain should be rescanned after import.
+    bool rescanNeeded() const;
 
     //! Offer the given wallets for filling in a cosigner key.
     void setWallets(const std::vector<WalletModel*>& wallets);
@@ -67,6 +71,7 @@ private:
     void loadCosignerKeyFromFile(int index);
 
     QLineEdit* m_wallet_name;
+    QCheckBox* m_rescan_checkbox;
     QSpinBox* m_required_spin;
     QSpinBox* m_total_spin;
     QFormLayout* m_cosigner_form;
