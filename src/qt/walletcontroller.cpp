@@ -443,15 +443,14 @@ void CreateMultisigWalletActivity::finish()
     }
 
     if (m_wallet_model) {
-        // For each cosigner key that was filled in from a loaded wallet,
-        // create a dedicated signing wallet holding the descriptors with that
-        // wallet's private key substituted in. The descriptors are
-        // deliberately not imported into the source wallet itself: a wallet
-        // recognizes funds of every imported descriptor, so that would add
-        // the multisig funds to the source wallet's balance and let its coin
-        // selection pick multisig coins it cannot fully sign.
+        // Teach each wallet whose cosigner key was filled in from a loaded
+        // wallet to sign for the multisig. Only small non-active helper
+        // descriptors are imported into it, never the multisig descriptors
+        // themselves, which would add the multisig funds to the wallet's own
+        // balance and let its coin selection pick multisig coins it cannot
+        // fully sign.
         QStringList import_failures;
-        QStringList signer_wallets;
+        QStringList signing_wallets;
         if (m_dialog) {
             const auto wallets{m_wallet_controller->getWallets()};
             for (const auto& [index, wallet_key] : m_wallet_keys) {
@@ -466,39 +465,11 @@ void CreateMultisigWalletActivity::finish()
                     import_failures << tr("%1: wallet could not be unlocked").arg(wallet_model->getDisplayName());
                     continue;
                 }
-                std::vector<std::string> priv_descs;
-                for (const QString& desc : m_dialog->descriptors()) {
-                    const auto priv_desc{wallet_model->wallet().getMultisigParticipationDescriptor(desc.toStdString())};
-                    if (!priv_desc) {
-                        import_failures << QString("%1: %2").arg(wallet_model->getDisplayName(), QString::fromStdString(util::ErrorString(priv_desc).translated));
-                        priv_descs.clear();
-                        break;
-                    }
-                    priv_descs.push_back(*priv_desc);
-                }
-                if (priv_descs.empty()) continue;
-                std::string source_name{wallet_model->wallet().getWalletName()};
-                if (source_name.empty()) source_name = "default";
-                const std::string signer_name{m_dialog->walletName().toStdString() + "_" + source_name + "_signer"};
-                std::vector<bilingual_str> warnings;
-                auto signer{node().walletLoader().createWallet(signer_name, /*passphrase=*/{}, WALLET_FLAG_DESCRIPTORS | WALLET_FLAG_BLANK_WALLET, warnings)};
-                if (!signer) {
-                    import_failures << QString("%1: %2").arg(wallet_model->getDisplayName(), QString::fromStdString(util::ErrorString(signer).translated));
-                    continue;
-                }
-                bool imported_ok{true};
-                for (size_t i = 0; i < priv_descs.size(); ++i) {
-                    const auto imported{(*signer)->importDescriptor(priv_descs[i], /*internal=*/i == 1, GetTime(), /*rescan=*/false)};
-                    if (!imported) {
-                        (*signer)->remove();
-                        import_failures << QString("%1: %2").arg(wallet_model->getDisplayName(), QString::fromStdString(util::ErrorString(imported).translated));
-                        imported_ok = false;
-                        break;
-                    }
-                }
-                if (imported_ok) {
-                    signer_wallets << QString::fromStdString(signer_name);
-                    m_wallet_controller->getOrCreateWallet(std::move(*signer));
+                const auto imported{wallet_model->wallet().importMultisigSigningKey(m_dialog->descriptors().at(0).toStdString())};
+                if (imported) {
+                    signing_wallets << wallet_model->getDisplayName();
+                } else {
+                    import_failures << QString("%1: %2").arg(wallet_model->getDisplayName(), QString::fromStdString(util::ErrorString(imported).translated));
                 }
             }
         }
@@ -506,11 +477,11 @@ void CreateMultisigWalletActivity::finish()
             /*: Message shown after a multisig wallet was created successfully.
                 %1 is the first receiving address of the wallet. */
             tr("Before using the wallet, verify with every cosigner that the first receiving address matches: %1").arg(m_first_address)};
-        if (!signer_wallets.isEmpty()) {
+        if (!signing_wallets.isEmpty()) {
             created_message += QLatin1String("\n\n") +
                 /*: Message shown after a multisig wallet was created successfully.
                     %1 is a list of wallet names. */
-                tr("Signing wallet(s) created for this computer's cosigner keys: %1. To sign a multisig transaction, open the signing wallet and load the PSBT there.").arg(signer_wallets.join(QLatin1String(", ")));
+                tr("The following wallets can sign for the multisig: %1. To add their signatures to a multisig transaction, use Load PSBT in them.").arg(signing_wallets.join(QLatin1String(", ")));
         }
         QMessageBox::information(m_parent_widget,
             //: Title of message box shown after a multisig wallet was created successfully.
@@ -518,9 +489,9 @@ void CreateMultisigWalletActivity::finish()
             created_message);
         if (!import_failures.isEmpty()) {
             QMessageBox::warning(m_parent_widget,
-                //: Title of message box shown when signing wallets could not be created for some cosigner keys.
+                //: Title of message box shown when the multisig signing key could not be set up in some cosigner wallets.
                 tr("Cosigner wallet setup incomplete"),
-                tr("No signing wallet could be set up for the following cosigners. They will not be able to sign for the multisig until one is:") + QLatin1Char('\n') + import_failures.join(QLatin1Char('\n')));
+                tr("The following wallets will not be able to sign for the multisig:") + QLatin1Char('\n') + import_failures.join(QLatin1Char('\n')));
         }
         Q_EMIT created(m_wallet_model);
     }

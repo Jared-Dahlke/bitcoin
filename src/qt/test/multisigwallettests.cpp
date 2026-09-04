@@ -41,7 +41,6 @@ using wallet::DuplicateMockDatabase;
 using wallet::GetMockableDatabase;
 using wallet::ISMINE_NO;
 using wallet::RemoveWallet;
-using wallet::WALLET_FLAG_BLANK_WALLET;
 using wallet::WALLET_FLAG_DESCRIPTORS;
 using wallet::WALLET_FLAG_DISABLE_PRIVATE_KEYS;
 using wallet::WalletContext;
@@ -126,65 +125,51 @@ void TestCreateMultisigWallet(interfaces::Node& node)
     dialog.findChild<QLineEdit*>("cosigner_key_edit_0")->setText(QString::fromStdString(*cosigner_key));
     QVERIFY(create_button->isEnabled());
 
-    // The signer wallet can produce the multisig descriptors with its own
-    // private key substituted in, for import into a dedicated signing wallet.
+    // The signer wallet learns to sign for the multisig via non-active
+    // helper descriptors covering its cosigner key's child keys.
     const QStringList descriptors{dialog.descriptors()};
     QCOMPARE(descriptors.size(), 2);
     const QString multisig_address{dialog.firstAddress()}; // changed with cosigner 1's key
-    std::vector<std::string> priv_descs;
-    for (const QString& desc : descriptors) {
-        const auto priv_desc{signer_interface->getMultisigParticipationDescriptor(desc.toStdString())};
-        QVERIFY(bool(priv_desc));
-        QVERIFY(QString::fromStdString(*priv_desc).contains("tprv"));
-        priv_descs.push_back(*priv_desc);
-    }
-    QVERIFY(bool(signer_interface->getMultisigCosignerKey()));
-
-    // Importing the participation descriptors into a dedicated signing wallet
-    // makes the multisig addresses IsMine there — and only there: the source
-    // wallet must not recognize them, or the multisig funds would count
-    // toward its balance and break its coin selection.
-    const std::shared_ptr<CWallet> participation_wallet = std::make_shared<CWallet>(node.context()->chain.get(), "", CreateMockableWalletDatabase());
-    participation_wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
-    participation_wallet->SetWalletFlag(WALLET_FLAG_BLANK_WALLET);
-    AddWallet(context, participation_wallet);
-    auto participation_interface = interfaces::MakeWallet(context, participation_wallet);
-    for (size_t i = 0; i < priv_descs.size(); ++i) {
-        QVERIFY(bool(participation_interface->importDescriptor(priv_descs[i], /*internal=*/i == 1, GetTime(), /*rescan=*/false)));
-    }
+    QVERIFY(bool(signer_interface->importMultisigSigningKey(descriptors[0].toStdString())));
+    // Repeating the import is a no-op, not an error.
+    QVERIFY(bool(signer_interface->importMultisigSigningKey(descriptors[0].toStdString())));
     const CTxDestination multisig_dest{DecodeDestination(multisig_address.toStdString())};
     QVERIFY(IsValidDestination(multisig_dest));
-    {
-        LOCK(participation_wallet->cs_wallet);
-        QVERIFY(participation_wallet->IsMine(multisig_dest) != ISMINE_NO);
-    }
+    // The helpers must not make the wallet treat the multisig funds as its
+    // own: they would count toward its balance and break its coin selection.
     {
         LOCK(signer_wallet->cs_wallet);
         QVERIFY(signer_wallet->IsMine(multisig_dest) == ISMINE_NO);
     }
-    // The signing wallet derives the same first receiving address.
-    const auto participation_dest{participation_interface->getNewDestination(OutputType::BECH32, "")};
-    QVERIFY(bool(participation_dest));
-    QCOMPARE(QString::fromStdString(EncodeDestination(*participation_dest)), multisig_address);
+    // Deriving the cosigner key still works.
+    QVERIFY(bool(signer_interface->getMultisigCosignerKey()));
 
-    // Reload the signing wallet from a copy of its database. The in-memory
+    // A second watch-only wallet tracks this multisig (the first one tracks
+    // the descriptors built before cosigner 1's key was replaced) and
+    // prepares its PSBTs.
+    const std::shared_ptr<CWallet> watch_wallet = std::make_shared<CWallet>(node.context()->chain.get(), "", CreateMockableWalletDatabase());
+    watch_wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    watch_wallet->SetWalletFlag(WALLET_FLAG_DISABLE_PRIVATE_KEYS);
+    AddWallet(context, watch_wallet);
+    auto watch_interface = interfaces::MakeWallet(context, watch_wallet);
+    for (int i = 0; i < descriptors.size(); ++i) {
+        QVERIFY(bool(watch_interface->importDescriptor(descriptors[i].toStdString(), /*internal=*/i == 1, GetTime(), /*rescan=*/false)));
+    }
+
+    // Reload the signer wallet from a copy of its database. The in-memory
     // Descriptor objects built at import time are discarded, so signing below
-    // must rely solely on the cosigner key as persisted to disk. This mirrors
+    // must rely solely on the helpers as persisted to disk. This mirrors
     // real usage (walletprocesspsbt / GUI Load PSBT after a restart).
-    std::unique_ptr<wallet::WalletDatabase> reload_db{DuplicateMockDatabase(GetMockableDatabase(*participation_wallet))};
-    RemoveWallet(context, participation_wallet, /*load_on_start=*/std::nullopt);
+    std::unique_ptr<wallet::WalletDatabase> reload_db{DuplicateMockDatabase(GetMockableDatabase(*signer_wallet))};
+    RemoveWallet(context, signer_wallet, /*load_on_start=*/std::nullopt);
     bilingual_str reload_error;
     std::vector<bilingual_str> reload_warnings;
     const std::shared_ptr<CWallet> reloaded_wallet{CWallet::Create(context, "", std::move(reload_db), WALLET_FLAG_DESCRIPTORS, reload_error, reload_warnings)};
     QVERIFY(reloaded_wallet != nullptr);
     AddWallet(context, reloaded_wallet);
-    {
-        LOCK(reloaded_wallet->cs_wallet);
-        QVERIFY(reloaded_wallet->IsMine(multisig_dest) != ISMINE_NO);
-    }
 
-    // The reloaded signer wallet can now add its signature to a PSBT spending
-    // the multisig, e.g. one created by the watch-only multisig wallet.
+    // The watch-only wallet prepares a PSBT spending the multisig, filling
+    // in the witness script and key origins that let cosigner wallets sign.
     CMutableTransaction funding_tx;
     funding_tx.vout.emplace_back(COIN, GetScriptForDestination(multisig_dest));
     CMutableTransaction spend_tx;
@@ -192,6 +177,14 @@ void TestCreateMultisigWallet(interfaces::Node& node)
     spend_tx.vout.emplace_back(COIN - 10000, GetScriptForDestination(multisig_dest));
     PartiallySignedTransaction psbtx{spend_tx};
     psbtx.inputs[0].witness_utxo = funding_tx.vout[0];
+    {
+        bool fill_complete{true};
+        size_t n_signed{0};
+        QCOMPARE(watch_interface->fillPSBT(SIGHASH_ALL, /*sign=*/false, /*bip32derivs=*/true, &n_signed, psbtx, fill_complete), TransactionError::OK);
+        QVERIFY(!fill_complete);
+        QVERIFY(!psbtx.inputs[0].witness_script.empty()); // multisig details ride in the PSBT
+        QVERIFY(!psbtx.inputs[0].hd_keypaths.empty());
+    }
     bool complete{true};
     QVERIFY(reloaded_wallet->FillPSBT(psbtx, complete, SIGHASH_ALL, /*sign=*/true, /*bip32derivs=*/true) == TransactionError::OK);
     QVERIFY(!complete); // the other cosigner's signature is still missing
@@ -208,6 +201,11 @@ void TestCreateMultisigWallet(interfaces::Node& node)
     PSBTOperationsDialog psbt_dialog{nullptr, &wallet_model, &client_model};
     PartiallySignedTransaction gui_psbtx{spend_tx};
     gui_psbtx.inputs[0].witness_utxo = funding_tx.vout[0];
+    {
+        bool fill_complete{true};
+        size_t n_signed{0};
+        QCOMPARE(watch_interface->fillPSBT(SIGHASH_ALL, /*sign=*/false, /*bip32derivs=*/true, &n_signed, gui_psbtx, fill_complete), TransactionError::OK);
+    }
     psbt_dialog.openWithPSBT(gui_psbtx);
     auto* sign_button = psbt_dialog.findChild<QPushButton*>("signTransactionButton");
     QVERIFY(sign_button->isEnabled());
@@ -224,11 +222,11 @@ void TestCreateMultisigWallet(interfaces::Node& node)
     }
     AddWallet(context, other_wallet);
     auto other_interface = interfaces::MakeWallet(context, other_wallet);
-    QVERIFY(!other_interface->getMultisigParticipationDescriptor(descriptors[0].toStdString()));
+    QVERIFY(!other_interface->importMultisigSigningKey(descriptors[0].toStdString()));
 
     RemoveWallet(context, other_wallet, /*load_on_start=*/std::nullopt);
     RemoveWallet(context, reloaded_wallet, /*load_on_start=*/std::nullopt);
-    RemoveWallet(context, signer_wallet, /*load_on_start=*/std::nullopt);
+    RemoveWallet(context, watch_wallet, /*load_on_start=*/std::nullopt);
     RemoveWallet(context, wallet, /*load_on_start=*/std::nullopt);
 }
 

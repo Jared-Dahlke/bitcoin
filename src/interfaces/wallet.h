@@ -103,7 +103,7 @@ public:
     //! so the wallet can sign for the multisig. The wallet must hold private
     //! keys, be unlocked, and its BIP 48 cosigner key must appear in the
     //! descriptor.
-    virtual util::Result<std::string> getMultisigParticipationDescriptor(const std::string& descriptor) = 0;
+    virtual util::Result<void> importMultisigSigningKey(const std::string& descriptor) = 0;
 
     //! Get wallet name.
     virtual std::string getWalletName() = 0;

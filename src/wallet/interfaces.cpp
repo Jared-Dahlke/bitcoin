@@ -22,6 +22,7 @@
 #include <util/bip32.h>
 #include <util/check.h>
 #include <util/strencodings.h>
+#include <util/time.h>
 #include <util/translation.h>
 #include <util/ui_change_type.h>
 #include <wallet/coincontrol.h>
@@ -280,37 +281,57 @@ public:
         std::copy(master_id.begin(), master_id.begin() + 4, fingerprint);
         return strprintf("[%s%s]%s", HexStr(fingerprint), FormatHDKeypath(MultisigKeyPath()), EncodeExtPubKey(derived->second.Neuter()));
     }
-    util::Result<std::string> getMultisigParticipationDescriptor(const std::string& descriptor) override
+    util::Result<void> importMultisigSigningKey(const std::string& descriptor) override
     {
         LOCK(m_wallet->cs_wallet);
         const auto derived{deriveMultisigCosignerKey()};
         if (!derived) return util::Error{util::ErrorString(derived)};
         const std::string xpub_str{EncodeExtPubKey(derived->second.Neuter())};
-        const std::string xprv_str{EncodeExtKey(derived->second)};
-        // Substituting the private key invalidates any trailing checksum, so
-        // strip it before the replacement.
-        std::string priv_desc{descriptor.substr(0, descriptor.find('#'))};
-        if (priv_desc.find(xpub_str) == std::string::npos) {
+        // Strip any trailing checksum before searching for the key.
+        const std::string pub_desc{descriptor.substr(0, descriptor.find('#'))};
+        if (pub_desc.find(xpub_str) == std::string::npos) {
             return util::Error{Untranslated("This wallet's cosigner key is not part of the descriptor")};
         }
-        for (size_t pos{0}; (pos = priv_desc.find(xpub_str, pos)) != std::string::npos; pos += xprv_str.size()) {
-            priv_desc.replace(pos, xpub_str.size(), xprv_str);
+        // Import non-active wpkh helpers covering the cosigner key's child
+        // keys. They only teach the wallet to derive those keys, so it can
+        // add signatures to the multisig's PSBTs (which carry the witness
+        // script and key origins). The multisig pays to wsh scripts the
+        // helpers never produce, so the wallet does not treat the multisig
+        // funds as its own.
+        unsigned char fingerprint[4];
+        const CKeyID master_id{derived->first.key.GetPubKey().GetID()};
+        std::copy(master_id.begin(), master_id.begin() + 4, fingerprint);
+        const std::string origin{strprintf("[%s%s]%s", HexStr(fingerprint), FormatHDKeypath(MultisigKeyPath()), EncodeExtKey(derived->second))};
+        for (int chain = 0; chain < 2; ++chain) {
+            const std::string helper_desc{strprintf("wpkh(%s/%d/*)", origin, chain)};
+            FlatSigningProvider keys;
+            std::string error;
+            std::unique_ptr<Descriptor> parsed_desc{Parse(helper_desc, keys, error, /*require_checksum=*/false)};
+            if (!parsed_desc) {
+                return util::Error{Untranslated(error)};
+            }
+            if (keys.keys.empty()) {
+                return util::Error{Untranslated("Unable to prepare the wallet's multisig signing key")};
+            }
+            WalletDescriptor w_desc(std::move(parsed_desc), /*creation_time=*/GetTime(), /*range_start=*/0, /*range_end=*/m_wallet->m_keypool_size, /*next_index=*/0);
+            // A repeated import (e.g. the wallet cosigns several multisigs)
+            // is a no-op: the helper already covers the key.
+            if (m_wallet->GetDescriptorScriptPubKeyMan(w_desc)) {
+                continue;
+            }
+            try {
+                // Deliberately not activated: the wallet keeps handing out
+                // addresses from its own chains.
+                auto spk_manager{m_wallet->AddWalletDescriptor(w_desc, keys, /*label=*/"", /*internal=*/chain == 1)};
+                if (!spk_manager) {
+                    return util::Error{Untranslated("Could not add descriptor to the wallet")};
+                }
+            } catch (const std::exception& e) {
+                return util::Error{Untranslated(e.what())};
+            }
         }
-        // Check that the substitution produced a parseable descriptor that
-        // actually carries the private key.
-        FlatSigningProvider keys;
-        std::string error;
-        std::unique_ptr<Descriptor> parsed_desc{Parse(priv_desc, keys, error, /*require_checksum=*/false)};
-        if (!parsed_desc) {
-            return util::Error{Untranslated(error)};
-        }
-        if (!parsed_desc->IsRange()) {
-            return util::Error{Untranslated("Descriptor must be ranged")};
-        }
-        if (keys.keys.empty()) {
-            return util::Error{Untranslated("Unable to substitute the wallet's private key into the descriptor")};
-        }
-        return priv_desc;
+        m_wallet->ConnectScriptPubKeyManNotifiers();
+        return {};
     }
     std::string getWalletName() override { return m_wallet->GetName(); }
     util::Result<CTxDestination> getNewDestination(const OutputType type, const std::string& label) override
