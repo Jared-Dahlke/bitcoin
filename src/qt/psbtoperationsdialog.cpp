@@ -76,6 +76,19 @@ void PSBTOperationsDialog::openWithPSBT(PartiallySignedTransaction psbtx)
     updateTransactionDisplay();
 }
 
+//! Whether signing gave the input new signature data. Unlike fillPSBT's
+//! n_signed, this also detects a partial multisig signature, which leaves the
+//! input incomplete.
+static bool InputGainedSignature(const PSBTInput& before, const PSBTInput& after)
+{
+    return after.partial_sigs.size() > before.partial_sigs.size() ||
+           after.m_tap_script_sigs.size() > before.m_tap_script_sigs.size() ||
+           after.m_musig2_partial_sigs != before.m_musig2_partial_sigs ||
+           (before.m_tap_key_sig.empty() && !after.m_tap_key_sig.empty()) ||
+           (before.final_script_sig.empty() && !after.final_script_sig.empty()) ||
+           (before.final_script_witness.IsNull() && !after.final_script_witness.IsNull());
+}
+
 void PSBTOperationsDialog::signTransaction()
 {
     bool complete;
@@ -83,6 +96,7 @@ void PSBTOperationsDialog::signTransaction()
 
     WalletModel::UnlockContext ctx(m_wallet_model->requestUnlock());
 
+    const std::vector<PSBTInput> inputs_before{m_transaction_data->inputs};
     const auto err{m_wallet_model->wallet().fillPSBT({.sign = true, .bip32_derivs = true}, &n_signed, *m_transaction_data, complete)};
 
     if (err) {
@@ -93,12 +107,17 @@ void PSBTOperationsDialog::signTransaction()
 
     updateTransactionDisplay();
 
+    size_t n_newly_signed{0};
+    for (size_t i = 0; i < m_transaction_data->inputs.size(); ++i) {
+        if (InputGainedSignature(inputs_before[i], m_transaction_data->inputs[i])) ++n_newly_signed;
+    }
+
     if (!complete && !ctx.isValid()) {
         showStatus(tr("Cannot sign inputs while wallet is locked."), StatusLevel::Warn);
-    } else if (!complete && n_signed < 1) {
+    } else if (!complete && n_newly_signed < 1) {
         showStatus(tr("Could not sign any more inputs."), StatusLevel::Warn);
     } else if (!complete) {
-        showStatus(tr("Signed %n input(s), but more signatures are still required.", "", n_signed),
+        showStatus(tr("Added signature(s) to %n input(s). More signatures are still required.", "", n_newly_signed),
             StatusLevel::Info);
     } else {
         showStatus(tr("Signed transaction successfully. Transaction is ready to broadcast."),
